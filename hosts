@@ -1,0 +1,2 @@
+[wtp]
+52.xx.xx.xx  ansible_ssh_private_key_file=keys/WTP_test.pem

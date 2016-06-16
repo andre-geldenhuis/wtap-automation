@@ -1,0 +1,108 @@
+---
+ - hosts: wtp
+   user: ubuntu
+   sudo: yes
+   tasks:
+    #install requirements
+    - name: Update system apt package cache
+      apt: update_cache=yes
+    - name: Install requisite system packages.
+      apt: name={{item}} update_cache=no
+      with_items:
+        - git
+        - nginx
+        - python3
+        - python3-virtualenv
+        - python3-dev
+        - python3-pip
+        - tomcat8
+
+    #users and groups
+    - name: Add tomcat group
+      group: name=tomcat state=present
+    - name: create tomcat user
+      user: name=tomcat shell=/bin/bash groups=tomcat
+
+    #keys - tomcat user key  -- TODO you might not want to do this
+      #create key with ssh-keygen -t rsa -b 4096
+    - name: Add ssh key for the tomcat user
+      authorized_key: user=tomcat key="{{ lookup('file', 'keys/tomcat.pub') }}"
+
+    #get project
+    - name: create directory for the install
+      file:
+        path: /var/www
+        state: directory
+        mode: u=rwX,g=rX,o=rX
+        owner: www-data
+        group: www-data
+    #clone from git
+    - name: Clone the repository from Git
+      git:
+        repo: https://gitlab.com/wai-te-ata-press/colenso.git
+        dest: /var/www
+
+    # Change ownership of the static files and directory so nginx can serve them.
+    - name: Set ownership of static assets so nginx can serve them.
+      file:
+        path: /var/www/static
+        mode: u=rwX,g=rX,o=rX
+        state: directory
+        recurse: yes
+
+    - name: Set ownership of main directory so nginx can traverse it.
+      file:
+        path: /var/www
+        state: directory
+        mode: u=rwX,g=rX,o=rX
+
+    # Change secret_key.
+    # Note tab for correct python, which is a bit awkward
+    # However changing the secret key from what is on github is really important
+    # This will create a file with the secret key if it doesn't already exist and use that.
+    - name: Change app secret key
+      lineinfile:
+        dest: /var/www/wtap/site/settings.py
+        regexp: SECRET_KEY
+        line: "    SECRET_KEY = '{{ lookup('password', 'secret_key length=35') }}'"
+
+    - name: Setup virtualenv
+      pip:
+        virtualenv: /var/www/wtap/site/eats
+        virtualenv_command: virtualenv-3.4
+    - name: Install the project requirements into the python virtualenv.
+      pip:
+        requirements: /var/www/wtap/site/requirements.txt
+        virtualenv: /var/www/wtap/site/eats
+
+    - name: chown the directory to www-data
+      file: path=/opt/nzdc state=directory owner=www-data group=www-data recurse=yes
+
+    - name: Set production env var for  app
+      lineinfile: dest=/etc/environment regexp='^WTAP_ENV' line=WTAP_ENV="prod"
+      notify:
+       - reload envs for this shell
+
+    # Setup Nginx
+    - name: remove default nginx site
+      file: path=/etc/nginx/sites-enabled/default state=absent
+    - name: Copy nginx-config file to sites available
+      copy: src=wtp_site dest=/etc/nginx/sites-available/wtp_site
+      notify: nginx reload
+    - name: link sites available to sites enabled
+      file: src=/etc/nginx/sites-available/wtp_site dest=/etc/nginx/sites-enabled/wtp_site state=link
+      notify: nginx reload
+
+    # setup supervisord
+    - name: Create log file location for wtp app
+      file: path=/var/log/flask_nzdc state=directory
+    - name: Copy supervisord conf for wtp app
+      copy: src=flask_nzdc.conf dest=/etc/supervisor/conf.d/flask_nzdc.conf
+    - name: Manage the flask nzdc program, make sure it is always running
+      supervisorctl: name=flask_nzdc state=started
+
+   handlers:
+    - name: reload envs for this shell
+      shell: while read -r env; do export "$env"; done
+    - name: nginx reload
+      service: name=nginx state=restarted
